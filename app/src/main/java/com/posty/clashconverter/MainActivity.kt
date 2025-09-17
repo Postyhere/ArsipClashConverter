@@ -1,325 +1,411 @@
 package com.posty.clashconverter
 
-import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.util.Base64
-import android.widget.Button
-import android.widget.EditText
-import android.widget.Toast
+import android.provider.MediaStore
+import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
-import org.json.JSONObject
-import org.yaml.snakeyaml.DumperOptions
-import org.yaml.snakeyaml.Yaml
-import java.io.OutputStreamWriter
+import java.net.URLDecoder
+import java.util.Base64
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var inputLinks: EditText
-    private lateinit var outputYaml: EditText
+    private lateinit var txtResult: TextView
+    private lateinit var btnConvert: Button
+    private lateinit var btnClear: Button
+    private lateinit var btnCopy: Button
+    private lateinit var btnShare: Button
+    private lateinit var btnSave: Button
+
+    private val HEADER = """
+redir-port: 9797
+tproxy-port: 9898
+mode: global
+allow-lan: true
+bind-address: '*'
+log-level: silent
+unified-delay: true
+geodata-mode: true
+geodata-loader: memconservative
+ipv6: false
+external-controller: 0.0.0.0:9090
+secret: ''
+external-ui: /data/adb/box/clash/dashboard
+global-client-fingerprint: chrome
+find-process-mode: strict
+keep-alive-interval: 15
+geo-auto-update: false
+geo-update-interval: 24
+tcp-concurrent: true
+
+tun:
+  enable: false
+  mtu: 9000
+  device: clash
+  stack: mixed
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+  auto-route: true
+  strict-route: false
+  auto-redirect: true
+  auto-detect-interface: true
+
+profile:
+  store-selected: true
+  store-fake-ip: false
+
+geox-url:
+  geoip: https://github.com/MetaCubeX/meta-rules-dat/raw/release/geoip-lite.dat
+  mmdb: https://github.com/MetaCubeX/meta-rules-dat/raw/release/country-lite.mmdb
+  geosite: https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.dat
+
+sniffer:
+  enable: true
+  force-dns-mapping: false
+  parse-pure-ip: false
+  override-destination: false
+  sniff:
+    QUIC:
+      ports: [443]
+    TLS:
+      ports: [443, 8443]
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+  sniffing: [tls, http]
+  port-whitelist: [80, 443]
+
+dns:
+  cache-algorithm: arc
+  enable: true
+  prefer-h3: false
+  ipv6: false
+  ipv6-timeout: 300
+  default-nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+  listen: 0.0.0.0:1053
+  use-hosts: true
+  enhanced-mode: redir-host
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - '*.lan'
+    - '*.ntp.*'
+  nameserver:
+    - 1.1.1.1#🆃🆆🅾🅿🅴🅽
+    - 8.8.8.8#🆃🆆🅾🅿🅴🅽
+  proxy-server-nameserver:
+    - 112.215.203.246
+
+proxies:
+""".trimIndent()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         inputLinks = findViewById(R.id.inputLinks)
-        outputYaml = findViewById(R.id.outputYaml)
+        txtResult  = findViewById(R.id.txtResult)
+        btnConvert = findViewById(R.id.btnConvert)
+        btnClear   = findViewById(R.id.btnClear)
+        btnCopy    = findViewById(R.id.btnCopy)
+        btnShare   = findViewById(R.id.btnShare)
+        btnSave    = findViewById(R.id.btnSave)
 
-        findViewById<Button>(R.id.btnConvert).setOnClickListener { doConvert() }
-        findViewById<Button>(R.id.btnClear).setOnClickListener { doClear() }
-        findViewById<Button>(R.id.btnSave).setOnClickListener { doSave() }
-        findViewById<Button>(R.id.btnShare).setOnClickListener { doShare() }
-    }
-
-    private fun doClear() {
-        inputLinks.setText("")
-        outputYaml.setText("")
+        btnConvert.setOnClickListener { doConvert() }
+        btnClear.setOnClickListener   { inputLinks.setText(""); txtResult.text = "" }
+        btnCopy.setOnClickListener    { copyToClipboard(txtResult.text.toString()) }
+        btnShare.setOnClickListener   { shareText(txtResult.text.toString()) }
+        btnSave.setOnClickListener    { saveToDownloads(txtResult.text.toString()) }
     }
 
     private fun doConvert() {
-        val links = inputLinks.text.toString()
-            .split("\n")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-
+        val links = extractLinks(inputLinks.text.toString())
         if (links.isEmpty()) {
-            Toast.makeText(this, "Masukkan link VMess/VLESS/Trojan!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Tempel link vmess/vless/trojan dulu", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val yamlText = buildClashConfig(links)
-        outputYaml.setText(yamlText)
-    }
+        val proxiesYaml = StringBuilder()
+        val names = mutableListOf<String>()
+        var idx = 1
 
-    // ==================== YAML Builder ====================
-    private fun buildClashConfig(links: List<String>): String {
-        val options = DumperOptions().apply {
-            defaultFlowStyle = DumperOptions.FlowStyle.BLOCK
-            defaultScalarStyle = DumperOptions.ScalarStyle.PLAIN
-            isPrettyFlow = true
-            indent = 2
-        }
-        val yaml = Yaml(options)
-
-        val baseConfig = mutableMapOf<String, Any>(
-            "redir-port" to 9797,
-            "tproxy-port" to 9898,
-            "mode" to "global",
-            "allow-lan" to true,
-            "bind-address" to "*",
-            "log-level" to "silent",
-            "unified-delay" to true,
-            "geodata-mode" to true,
-            "geodata-loader" to "memconservative",
-            "ipv6" to false,
-            "external-controller" to "0.0.0.0:9090",
-            "secret" to "",
-            "external-ui" to "/data/adb/box/clash/dashboard",
-            "global-client-fingerprint" to "chrome",
-            "find-process-mode" to "strict",
-            "keep-alive-interval" to 15,
-            "geo-auto-update" to false,
-            "geo-update-interval" to 24,
-            "tcp-concurrent" to true,
-            "tun" to mapOf(
-                "exclude-package" to emptyList<String>(),
-                "enable" to false,
-                "mtu" to 9000,
-                "device" to "clash",
-                "stack" to "mixed",
-                "dns-hijack" to listOf("any:53", "tcp://any:53"),
-                "auto-route" to true,
-                "strict-route" to false,
-                "auto-redirect" to true,
-                "auto-detect-interface" to true
-            ),
-            "profile" to mapOf(
-                "store-selected" to true,
-                "store-fake-ip" to false
-            ),
-            "dns" to mapOf(
-                "cache-algorithm" to "arc",
-                "enable" to true,
-                "prefer-h3" to false,
-                "ipv6" to false,
-                "default-nameserver" to listOf("8.8.8.8", "1.1.1.1"),
-                "listen" to "0.0.0.0:1053",
-                "use-hosts" to true,
-                "enhanced-mode" to "redir-host",
-                "fake-ip-range" to "198.18.0.1/16",
-                "fake-ip-filter" to listOf("*.lan", "*.ntp.*"),
-                "nameserver" to listOf("1.1.1.1", "8.8.8.8"),
-                "proxy-server-nameserver" to listOf("112.215.203.246")
-            ),
-            "proxies" to mutableListOf<Map<String, Any>>(),
-            "proxy-groups" to listOf(
-                mutableMapOf(
-                    "name" to "🆃🆆🅾🅿🅴🅽",
-                    "type" to "select",
-                    "proxies" to mutableListOf("DIRECT")
-                )
-            ),
-            "rules" to listOf("MATCH,🆃🆆🅾🅿🅴🅽")
-        )
-
-        val proxyList = baseConfig["proxies"] as MutableList<Map<String, Any>>
-        val groupList = (baseConfig["proxy-groups"] as List<MutableMap<String, Any>>)[0]["proxies"] as MutableList<String>
-
-        links.forEach { link ->
-            val proxy: Map<String, Any>? = when {
-                link.startsWith("vmess://") -> parseVmessLink(link)
-                link.startsWith("vless://") -> parseVlessLink(link)
-                link.startsWith("trojan://") -> parseTrojanLink(link)
-                else -> null
-            }
-            if (proxy != null) {
-                proxyList.add(proxy)
-                // Amanin supaya tidak crash kalau name kosong
-                val safeName = (proxy["name"] as? String)?.ifBlank { "Proxy-${groupList.size + 1}" }
-                    ?: "Proxy-${groupList.size + 1}"
-                groupList.add(safeName)
-            }
-        }
-
-        return yaml.dump(baseConfig)
-    }
-
-    // ==================== VMESS Parser ====================
-    private fun parseVmessLink(link: String): Map<String, Any>? {
-        return try {
-            val payload = link.removePrefix("vmess://")
-            val decoded = String(Base64.decode(payload, Base64.NO_WRAP))
-            val obj = JSONObject(decoded)
-
-            val add = obj.optString("add")
-            val port = obj.optInt("port", 0)
-            val id   = obj.optString("id")
-            if (add.isBlank() || port <= 0 || id.isBlank()) return null
-
-            val name = obj.optString("ps").ifBlank { "VMess $add" }
-            val net  = obj.optString("net", "tcp").lowercase()
-            val tls  = obj.optString("tls").equals("tls", ignoreCase = true) ||
-                       obj.optString("security").equals("tls", ignoreCase = true)
-            val sni  = obj.optString("sni").ifBlank { obj.optString("host").ifBlank { add } }
-            val path = obj.optString("path", "/")
-            val hostHdr = obj.optString("host").ifBlank { sni }
-
-            val map = mutableMapOf<String, Any>(
-                "name" to name,
-                "type" to "vmess",
-                "server" to add,
-                "port" to port,
-                "uuid" to id,
-                "alterId" to obj.optInt("aid", 0),
-                "cipher" to "auto",
-                "tls" to tls,
-                "skip-cert-verify" to true,
-                "udp" to true
-            )
-            if (net == "ws") {
-                map["network"] = "ws"
-                map["ws-opts"] = mapOf(
-                    "path" to path,
-                    "headers" to mapOf("Host" to hostHdr)
-                )
-            }
-            if (tls) map["servername"] = sni
-            map
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    // ==================== VLESS Parser ====================
-    private fun parseVlessLink(link: String): Map<String, Any>? {
-        return try {
-            val uri = Uri.parse(link)
-
-            val host = uri.host ?: return null
-            val port = if (uri.port > 0) uri.port else 443
-            val uuid = uri.userInfo ?: ""
-            val name = (uri.fragment ?: "").ifBlank { "VLESS $host" }
-
-            val network = (uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: "tcp").lowercase()
-            val security = (uri.getQueryParameter("security") ?: "").lowercase()
-            val tls = security == "tls" || security == "reality" || security == "xtls"
-            val sni = (uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host)
-            val path = uri.getQueryParameter("path") ?: "/"
-            val hostHdr = (uri.getQueryParameter("host") ?: sni)
-
-            val map = mutableMapOf<String, Any>(
-                "name" to name,
-                "type" to "vless",
-                "server" to host,
-                "port" to port,
-                "uuid" to uuid,
-                "udp" to true,
-                "tls" to tls,
-                "skip-cert-verify" to true
-            )
-            if (tls) map["servername"] = sni
-            if (network == "ws") {
-                map["network"] = "ws"
-                map["ws-opts"] = mapOf(
-                    "path" to path,
-                    "headers" to mapOf("Host" to hostHdr)
-                )
-            }
-            map
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    // ==================== TROJAN Parser ====================
-    private fun parseTrojanLink(link: String): Map<String, Any>? {
-        return try {
-            val uri = Uri.parse(link)
-
-            val host = uri.host ?: return null
-            val port = if (uri.port > 0) uri.port else 443
-            val passwd = uri.userInfo ?: ""
-            val name = (uri.fragment ?: "").ifBlank { "Trojan $host" }
-
-            val network = (uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: "tcp").lowercase()
-            val sni = (uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host)
-            val path = uri.getQueryParameter("path") ?: "/"
-            val hostHdr = (uri.getQueryParameter("host") ?: sni)
-
-            val map = mutableMapOf<String, Any>(
-                "name" to name,
-                "type" to "trojan",
-                "server" to host,
-                "port" to port,
-                "password" to passwd,
-                "udp" to true,
-                "sni" to sni,
-                "skip-cert-verify" to true
-            )
-            if (network == "ws") {
-                map["network"] = "ws"
-                map["ws-opts"] = mapOf(
-                    "path" to path,
-                    "headers" to mapOf("Host" to hostHdr)
-                )
-            }
-            map
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    // ==================== SAVE & SHARE ====================
-    private fun doSave() {
-        val content = outputYaml.text.toString()
-        if (content.isEmpty()) {
-            Toast.makeText(this, "Tidak ada YAML untuk disimpan", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "text/yaml"
-            putExtra(Intent.EXTRA_TITLE, "clash.yaml")
-        }
-        startActivityForResult(intent, 1001)
-    }
-
-    private fun doShare() {
-        val content = outputYaml.text.toString()
-        if (content.isEmpty()) {
-            Toast.makeText(this, "Tidak ada YAML untuk dishare", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val shareIntent = Intent().apply {
-            action = Intent.ACTION_SEND
-            putExtra(Intent.EXTRA_TEXT, content)
-            type = "text/plain"
-        }
-        startActivity(Intent.createChooser(shareIntent, "Bagikan file YAML"))
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 1001 && resultCode == Activity.RESULT_OK) {
-            data?.data?.also { uri ->
-                saveToUri(uri, outputYaml.text.toString())
-            }
-        }
-    }
-
-    private fun saveToUri(uri: Uri, content: String) {
-        try {
-            contentResolver.openOutputStream(uri)?.use { out ->
-                OutputStreamWriter(out).use { writer ->
-                    writer.write(content)
+        for (raw in links) {
+            when {
+                raw.startsWith("vmess://", true) -> {
+                    val v = parseVmess(raw)
+                    if (v != null) {
+                        val name = (v["ps"] as? String)?.takeIf { it.isNotBlank() } ?: "VMess$idx"
+                        names += name
+                        proxiesYaml.append(vmessToYaml(name, v))
+                        idx++
+                    }
+                }
+                raw.startsWith("vless://", true) -> {
+                    val v = parseVless(raw)
+                    if (v != null) {
+                        names += v.name
+                        proxiesYaml.append(vlessToYaml(v))
+                        idx++
+                    }
+                }
+                raw.startsWith("trojan://", true) -> {
+                    val v = parseTrojan(raw)
+                    if (v != null) {
+                        names += v.name
+                        proxiesYaml.append(trojanToYaml(v))
+                        idx++
+                    }
                 }
             }
-            Toast.makeText(this, "Berhasil disimpan", Toast.LENGTH_SHORT).show()
+        }
+
+        if (names.isEmpty()) {
+            Toast.makeText(this, "Link tidak valid", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val groupsYaml = buildGroupsYaml(names)
+        val rulesYaml  = "rules:\n  - MATCH,🆃🆆🅾🅿🅴🅽\n"
+        val finalYaml = buildString {
+    append(HEADER.trimEnd())      // buang spasi akhir kalau ada
+    append('\n')                  // pastikan newline setelah "proxies:"
+    append(proxiesYaml.toString().trimStart())
+    append('\n')
+    append('\n')
+    append(groupsYaml.trimEnd())
+    append('\n')
+    append(rulesYaml)
+}
+txtResult.text = finalYaml
+    }
+
+    // ===== Helpers =====
+    private fun extractLinks(text: String): List<String> {
+        val regex = Regex("(vmess://[A-Za-z0-9+/_=-]+|vless://\\S+|trojan://\\S+)", RegexOption.IGNORE_CASE)
+        return regex.findAll(text).map { it.value.trim() }.distinct().toList()
+    }
+
+    private fun b64(s: String): String {
+        var x = s.replace('-', '+').replace('_', '/')
+        val pad = x.length % 4
+        if (pad != 0) x = x.padEnd(x.length + (4 - pad), '=')
+        return String(Base64.getDecoder().decode(x))
+    }
+
+    // ===== VMESS =====
+    private fun parseVmess(link: String): Map<String, Any?>? {
+        return try {
+            val payload = link.removePrefix("vmess://")
+            val json = b64(payload)
+            fun j(key: String): String? {
+                val r = Regex("\"$key\"\\s*:\\s*\"([^\"]*)\"")
+                return r.find(json)?.groupValues?.getOrNull(1)
+            }
+            val add = j("add") ?: return null
+            val port = j("port") ?: return null
+            val id = j("id") ?: return null
+            mapOf(
+                "ps" to j("ps"),
+                "add" to add,
+                "port" to port,
+                "id" to id,
+                "aid" to (j("aid") ?: "0"),
+                "net" to (j("net") ?: "ws"),
+                "path" to (j("path") ?: "/"),
+                "host" to j("host"),
+                "sni"  to j("sni"),
+                "tls"  to j("tls")
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun vmessToYaml(name: String, v: Map<String, Any?>): String {
+        val server = v["add"] as String
+        val port = (v["port"] as String).toInt()
+        val uuid = v["id"] as String
+        val alterId = (v["aid"] as String).toIntOrNull() ?: 0
+        val net = (v["net"] as? String ?: "ws").lowercase()
+        val path = (v["path"] as? String ?: "/")
+        val host = (v["host"] as? String)
+        val sni  = (v["sni"]  as? String) ?: host
+        val tls = ((v["tls"] as? String)?.lowercase() == "tls")
+
+        return buildString {
+            append("- name: ").append(name).append('\n')
+            append("  type: vmess\n")
+            append("  server: ").append(server).append('\n')
+            append("  port: ").append(port).append('\n')
+            append("  uuid: ").append(uuid).append('\n')
+            append("  alterId: ").append(alterId).append('\n')
+            append("  cipher: auto\n")
+            append("  tls: ").append(if (tls) "true" else "false").append('\n')
+            append("  skip-cert-verify: true\n")
+            append("  servername: ").append(sni ?: server).append('\n')
+            append("  network: ").append(net).append('\n')
+            append("  udp: true\n")
+            if (net == "ws") {
+                append("  ws-opts:\n")
+                append("    path: ").append(path).append('\n')
+                append("    headers:\n")
+                append("      Host: ").append(host ?: sni ?: server).append('\n')
+            }
+        }
+    }
+
+    // ===== VLESS =====
+    data class Vless(
+        val name: String, val server: String, val port: Int, val uuid: String,
+        val tls: Boolean, val sni: String?, val network: String, val path: String?, val host: String?
+    )
+
+    private fun parseVless(link: String): Vless? {
+        return try {
+            val u = Uri.parse(link)
+            val name = (u.fragment ?: "").let { URLDecoder.decode(it, "UTF-8") }
+                .ifBlank { "VLESS ${u.host}:${u.port.takeIf { it != -1 } ?: 443}" }
+            val type = (u.getQueryParameter("type") ?: u.getQueryParameter("network") ?: "tcp").lowercase()
+            val security = (u.getQueryParameter("security") ?: "").lowercase()
+            val tls = security == "tls" || security == "reality" || security == "xtls"
+            val sni = u.getQueryParameter("sni") ?: u.getQueryParameter("host") ?: u.host
+            val path = u.getQueryParameter("path") ?: "/"
+            val host = u.getQueryParameter("host") ?: sni ?: u.host
+            Vless(
+                name = name,
+                server = u.host ?: return null,
+                port = (if (u.port != -1) u.port else 443),
+                uuid = u.userInfo ?: return null,
+                tls = tls,
+                sni = sni,
+                network = type,
+                path = if (type == "ws") path else null,
+                host = if (type == "ws") host else null
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun vlessToYaml(v: Vless): String {
+        return buildString {
+            append("- name: ").append(v.name).append('\n')
+            append("  type: vless\n")
+            append("  server: ").append(v.server).append('\n')
+            append("  port: ").append(v.port).append('\n')
+            append("  uuid: ").append(v.uuid).append('\n')
+            append("  udp: true\n")
+            append("  tls: ").append(if (v.tls) "true" else "false").append('\n')
+            append("  skip-cert-verify: true\n")
+            if (v.tls && !v.sni.isNullOrBlank()) append("  servername: ").append(v.sni).append('\n')
+            append("  network: ").append(v.network).append('\n')
+            if (v.network == "ws" && v.path != null && v.host != null) {
+                append("  ws-opts:\n")
+                append("    path: ").append(v.path).append('\n')
+                append("    headers:\n")
+                append("      Host: ").append(v.host).append('\n')
+            }
+        }
+    }
+
+    // ===== TROJAN =====
+    data class Trojan(
+        val name: String, val server: String, val port: Int, val password: String,
+        val sni: String?, val network: String, val path: String?, val host: String?
+    )
+
+    private fun parseTrojan(link: String): Trojan? {
+        return try {
+            val u = Uri.parse(link)
+            val name = (u.fragment ?: "").let { URLDecoder.decode(it, "UTF-8") }
+                .ifBlank { "TROJAN ${u.host}:${u.port.takeIf { it != -1 } ?: 443}" }
+            val type = (u.getQueryParameter("type") ?: u.getQueryParameter("network") ?: "tcp").lowercase()
+            val sni = u.getQueryParameter("sni") ?: u.getQueryParameter("host") ?: u.host
+            val path = u.getQueryParameter("path") ?: "/"
+            val host = u.getQueryParameter("host") ?: sni ?: u.host
+            Trojan(
+                name = name,
+                server = u.host ?: return null,
+                port = (if (u.port != -1) u.port else 443),
+                password = u.userInfo ?: return null,
+                sni = sni,
+                network = type,
+                path = if (type == "ws") path else null,
+                host = if (type == "ws") host else null
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun trojanToYaml(v: Trojan): String {
+        return buildString {
+            append("- name: ").append(v.name).append('\n')
+            append("  type: trojan\n")
+            append("  server: ").append(v.server).append('\n')
+            append("  port: ").append(v.port).append('\n')
+            append("  password: ").append(v.password).append('\n')
+            append("  udp: true\n")
+            append("  sni: ").append(v.sni ?: v.server).append('\n')
+            append("  skip-cert-verify: true\n")
+            append("  network: ").append(v.network).append('\n')
+            if (v.network == "ws" && v.path != null && v.host != null) {
+                append("  ws-opts:\n")
+                append("    path: ").append(v.path).append('\n')
+                append("    headers:\n")
+                append("      Host: ").append(v.host).append('\n')
+            }
+        }
+    }
+
+    // ===== GROUP & RULES (tanpa DIRECT) =====
+    private fun buildGroupsYaml(names: List<String>): String {
+        return buildString {
+            append("proxy-groups:\n")
+            append("  - name: 🆃🆆🅾🅿🅴🅽\n")
+            append("    type: select\n")
+            append("    proxies:\n")
+            for (n in names) append("     - ").append(n).append('\n') // 5 spasi agar mirip contoh
+        }
+    }
+
+    private fun copyToClipboard(text: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("clash.yaml", text))
+        Toast.makeText(this, "Disalin ke clipboard", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareText(text: String) {
+        val it = Intent(Intent.ACTION_SEND)
+        it.type = "text/plain"
+        it.putExtra(Intent.EXTRA_TEXT, text)
+        startActivity(Intent.createChooser(it, "Bagikan YAML"))
+    }
+
+    private fun saveToDownloads(text: String) {
+        try {
+            val name = "clash.yaml"
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "text/yaml")
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+                Toast.makeText(this, "Tersimpan di Download/$name", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Gagal menyimpan", Toast.LENGTH_SHORT).show()
+            }
         } catch (e: Exception) {
-            Toast.makeText(this, "Gagal simpan: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Error simpan: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 }
